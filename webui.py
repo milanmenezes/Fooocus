@@ -16,6 +16,7 @@ import modules.meta_parser
 import args_manager
 import copy
 import launch
+import modules.civitai as civitai
 from extras.inpaint_mask import SAMOptions
 
 from modules.sdxl_styles import legal_style_names
@@ -683,6 +684,14 @@ with shared.gradio_root:
                                                     elem_classes='lora_weight', scale=5)
                             lora_ctrls += [lora_enabled, lora_model, lora_weight]
 
+                    with gr.Row():
+                        civitai_url = gr.Textbox(label='Download LoRA from Civitai',
+                                                 placeholder='https://civitai.red/models/12345?modelVersionId=67890',
+                                                 scale=6)
+                        civitai_download = gr.Button(value='\U00002b07\U0000fe0f Download',
+                                                     variant='secondary', scale=1)
+                    civitai_status = gr.Markdown(value='', visible=False)
+
                 with gr.Row():
                     refresh_files = gr.Button(label='Refresh', value='\U0001f504 Refresh All Files', variant='secondary', elem_classes='refresh_button')
             with gr.Tab(label='Advanced'):
@@ -885,6 +894,44 @@ with shared.gradio_root:
                     refresh_files_output += [preset_selection]
                 refresh_files.click(refresh_files_clicked, [], refresh_files_output + lora_ctrls,
                                     queue=False, show_progress=False)
+
+                def download_civitai_lora_clicked(url, *lora_args):
+                    triples = [list(lora_args[i:i + 3]) for i in range(0, len(lora_args), 3)]
+
+                    if not (url or '').strip():
+                        no_change = [u for _ in triples for u in (gr.update(), gr.update(), gr.update())]
+                        return [gr.update(value='⚠️ Please enter a Civitai URL.', visible=True)] + no_change
+
+                    try:
+                        filename = civitai.download_lora(url)
+                    except Exception as e:
+                        no_change = [u for _ in triples for u in (gr.update(), gr.update(), gr.update())]
+                        return [gr.update(value=f'❌ Download failed: {e}', visible=True)] + no_change
+
+                    modules.config.update_files()
+                    choices = ['None'] + modules.config.lora_filenames
+
+                    assigned = False
+                    updates = []
+                    for enabled, model, weight in triples:
+                        if not assigned and model in (None, 'None'):
+                            updates += [gr.update(value=True),
+                                        gr.update(choices=choices, value=filename),
+                                        gr.update()]
+                            assigned = True
+                        else:
+                            updates += [gr.update(), gr.update(choices=choices), gr.update()]
+
+                    if assigned:
+                        msg = f'✅ Downloaded and selected `{filename}`.'
+                    else:
+                        msg = f'✅ Downloaded `{filename}`. All LoRA slots are in use — select it manually.'
+                    return [gr.update(value=msg, visible=True)] + updates
+
+                civitai_download.click(download_civitai_lora_clicked,
+                                       inputs=[civitai_url] + lora_ctrls,
+                                       outputs=[civitai_status] + lora_ctrls,
+                                       queue=False, show_progress=True)
 
         state_is_generating = gr.State(False)
 
