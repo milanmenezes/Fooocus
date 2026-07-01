@@ -736,7 +736,6 @@ def worker():
 
                 progressbar(async_task, current_progress, f'Preparing Fooocus text #{i + 1} ...')
                 expansion = pipeline.final_expansion(t['task_prompt'], t['task_seed'])
-                print(f'[Prompt Expansion] {expansion}')
                 t['expansion'] = expansion
                 t['positive'] = copy.deepcopy(t['positive']) + [expansion]  # Deep copy.
         if advance_progress:
