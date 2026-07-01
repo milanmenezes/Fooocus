@@ -1,10 +1,15 @@
 import os
 import re
+import json
 
 import httpx
 from tqdm import tqdm
 
 import modules.config
+
+# Suffix for the sidecar file storing Civitai metadata (trigger words etc.)
+# next to each downloaded LoRA, e.g. "myLora.safetensors.civitai.json".
+SIDECAR_SUFFIX = '.civitai.json'
 
 # Read the civitai.red / civitai.com API key from the environment.
 # Set CIVITAI_API_KEY in your Colab Enterprise environment before launching.
@@ -84,7 +89,18 @@ def resolve_lora(url: str):
         raise ValueError('Civitai API did not return a download URL.')
     if not file_name:
         file_name = f'civitai_{version.get("id", "lora")}.safetensors'
-    return download_url, file_name
+    trained_words = version.get('trainedWords') or []
+    return download_url, file_name, trained_words
+
+
+def _save_sidecar(dest: str, url: str, trained_words: list):
+    """Write a sidecar JSON next to the LoRA with its Civitai trigger words."""
+    sidecar = dest + SIDECAR_SUFFIX
+    try:
+        with open(sidecar, 'w', encoding='utf-8') as f:
+            json.dump({'source_url': url, 'trained_words': trained_words}, f, indent=2)
+    except Exception as e:
+        print(f'Could not write Civitai sidecar {sidecar}: {e}')
 
 
 def download_lora(url: str) -> str:
@@ -92,10 +108,14 @@ def download_lora(url: str) -> str:
 
     Returns the saved file name. Skips the download if the file already exists.
     """
-    download_url, file_name = resolve_lora(url)
+    download_url, file_name, trained_words = resolve_lora(url)
     model_dir = modules.config.paths_loras[0]
     os.makedirs(model_dir, exist_ok=True)
     dest = os.path.abspath(os.path.join(model_dir, file_name))
+
+    # Always (re)write the sidecar so trigger words are available even if the
+    # model file itself is already present from a previous download.
+    _save_sidecar(dest, url, trained_words)
 
     if os.path.exists(dest):
         print(f'LoRA already present, skipping download: {dest}')

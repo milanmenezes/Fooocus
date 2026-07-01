@@ -619,6 +619,14 @@ with shared.gradio_root:
                 history_link = gr.HTML()
                 shared.gradio_root.load(update_history_link, outputs=history_link, queue=False, show_progress=False)
 
+                def update_lora_trigger_link():
+                    import modules.lora_info as lora_info
+                    path = lora_info.build_lora_trigger_page()
+                    return gr.update(value=f'<a href="file={path}" target="_blank">\U0001F9E9 LoRA Trigger Words</a>')
+
+                lora_trigger_link = gr.HTML()
+                shared.gradio_root.load(update_lora_trigger_link, outputs=lora_trigger_link, queue=False, show_progress=False)
+
             with gr.Tab(label='Styles', elem_classes=['style_selections_tab']):
                 style_sorter.try_load_sorted_styles(
                     style_names=legal_style_names,
@@ -908,6 +916,8 @@ with shared.gradio_root:
 
                 def refresh_files_clicked():
                     modules.config.update_files()
+                    import modules.lora_info as lora_info
+                    lora_info.build_lora_trigger_page()
                     results = [gr.update(choices=modules.config.model_filenames)]
                     results += [gr.update(choices=['None'] + modules.config.model_filenames)]
                     results += [gr.update(choices=[flags.default_vae] + modules.config.vae_filenames)]
@@ -938,6 +948,8 @@ with shared.gradio_root:
                         return [gr.update(value=f'❌ Download failed: {e}', visible=True)] + no_change
 
                     modules.config.update_files()
+                    import modules.lora_info as lora_info
+                    lora_info.build_lora_trigger_page()
                     choices = ['None'] + modules.config.lora_filenames
 
                     assigned = False
