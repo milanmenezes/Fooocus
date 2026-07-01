@@ -183,20 +183,6 @@ with shared.gradio_root:
                     load_parameter_button = gr.Button(label="Load Parameters", value="Load Parameters", elem_classes='type_row', elem_id='load_parameter_button', visible=False)
                     skip_button = gr.Button(label="Skip", value="Skip", elem_classes='type_row_half', elem_id='skip_button', visible=False)
                     stop_button = gr.Button(label="Stop", value="Stop", elem_classes='type_row_half', elem_id='stop_button', visible=False)
-                    shutdown_button = gr.Button(label="Shutdown", value="\U0001f6d1 Shutdown", elem_classes='type_row', elem_id='shutdown_button', variant='stop', visible=True)
-
-                    def shutdown_clicked():
-                        print('Shutdown requested from UI. Stopping Fooocus.')
-                        # Force-terminate the whole process (stops the Colab cell).
-                        # Done from a short-lived thread so this HTTP response can
-                        # return first; os._exit(0) is used because a bare exit(0)
-                        # would only raise SystemExit inside a Gradio worker thread
-                        # and would not actually stop the server.
-                        import threading
-                        threading.Timer(0.5, lambda: os._exit(0)).start()
-                        return
-
-                    shutdown_button.click(shutdown_clicked, queue=False, show_progress=False)
 
                     def stop_clicked(currentTask):
                         import ldm_patched.modules.model_management as model_management
@@ -709,6 +695,35 @@ with shared.gradio_root:
                 with gr.Row():
                     refresh_files = gr.Button(label='Refresh', value='\U0001f504 Refresh All Files', variant='secondary', elem_classes='refresh_button')
             with gr.Tab(label='Advanced'):
+                with gr.Group():
+                    shutdown_button = gr.Button(value='\U0001f6d1 Shutdown Fooocus', variant='stop')
+                    with gr.Row(visible=False) as shutdown_confirm_row:
+                        shutdown_confirm_button = gr.Button(value='Confirm shutdown', variant='stop')
+                        shutdown_cancel_button = gr.Button(value='Cancel', variant='secondary')
+
+                def shutdown_request():
+                    # Reveal the confirm/cancel buttons instead of exiting immediately.
+                    return gr.update(visible=False), gr.update(visible=True)
+
+                def shutdown_cancel():
+                    return gr.update(visible=True), gr.update(visible=False)
+
+                def shutdown_confirm():
+                    print('Shutdown confirmed from UI. Stopping Fooocus.')
+                    # Force-terminate the whole process (stops the Colab cell), from a
+                    # short-lived thread so this HTTP response returns first. os._exit(0)
+                    # is used because a bare exit(0) only raises SystemExit inside a
+                    # Gradio worker thread and would not actually stop the server.
+                    import threading
+                    threading.Timer(0.5, lambda: os._exit(0)).start()
+                    return
+
+                shutdown_button.click(shutdown_request, outputs=[shutdown_button, shutdown_confirm_row],
+                                      queue=False, show_progress=False)
+                shutdown_cancel_button.click(shutdown_cancel, outputs=[shutdown_button, shutdown_confirm_row],
+                                             queue=False, show_progress=False)
+                shutdown_confirm_button.click(shutdown_confirm, queue=False, show_progress=False)
+
                 guidance_scale = gr.Slider(label='Guidance Scale', minimum=1.0, maximum=30.0, step=0.01,
                                            value=modules.config.default_cfg_scale,
                                            info='Higher value means style is cleaner, vivider, and more artistic.')
