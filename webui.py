@@ -183,6 +183,20 @@ with shared.gradio_root:
                     load_parameter_button = gr.Button(label="Load Parameters", value="Load Parameters", elem_classes='type_row', elem_id='load_parameter_button', visible=False)
                     skip_button = gr.Button(label="Skip", value="Skip", elem_classes='type_row_half', elem_id='skip_button', visible=False)
                     stop_button = gr.Button(label="Stop", value="Stop", elem_classes='type_row_half', elem_id='stop_button', visible=False)
+                    shutdown_button = gr.Button(label="Shutdown", value="\U0001f6d1 Shutdown", elem_classes='type_row', elem_id='shutdown_button', variant='stop', visible=True)
+
+                    def shutdown_clicked():
+                        print('Shutdown requested from UI. Stopping Fooocus.')
+                        # Force-terminate the whole process (stops the Colab cell).
+                        # Done from a short-lived thread so this HTTP response can
+                        # return first; os._exit(0) is used because a bare exit(0)
+                        # would only raise SystemExit inside a Gradio worker thread
+                        # and would not actually stop the server.
+                        import threading
+                        threading.Timer(0.5, lambda: os._exit(0)).start()
+                        return
+
+                    shutdown_button.click(shutdown_clicked, queue=False, show_progress=False)
 
                     def stop_clicked(currentTask):
                         import ldm_patched.modules.model_management as model_management
