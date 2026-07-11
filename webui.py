@@ -17,6 +17,7 @@ import args_manager
 import copy
 import launch
 import modules.civitai as civitai
+import modules.lora_info as lora_info
 from extras.inpaint_mask import SAMOptions
 
 from modules.sdxl_styles import legal_style_names
@@ -627,6 +628,22 @@ with shared.gradio_root:
                 lora_trigger_link = gr.HTML()
                 shared.gradio_root.load(update_lora_trigger_link, outputs=lora_trigger_link, queue=False, show_progress=False)
 
+                def delete_lora_clicked(filename):
+                    import modules.lora_info as lora_info
+                    message = lora_info.delete_lora(filename)
+                    modules.config.update_files()
+                    lora_info.build_lora_trigger_page()
+                    return message
+
+                # Hidden endpoint used by the LoRA trigger-words page's Delete
+                # buttons via POST <root>/run/delete_lora.
+                delete_lora_name = gr.Textbox(visible=False)
+                delete_lora_message = gr.Textbox(visible=False)
+                delete_lora_button = gr.Button(visible=False)
+                delete_lora_button.click(delete_lora_clicked, inputs=delete_lora_name,
+                                         outputs=delete_lora_message, queue=False,
+                                         show_progress=False, api_name='delete_lora')
+
             with gr.Tab(label='Styles', elem_classes=['style_selections_tab']):
                 style_sorter.try_load_sorted_styles(
                     style_names=legal_style_names,
@@ -679,6 +696,8 @@ with shared.gradio_root:
 
                 with gr.Group():
                     lora_ctrls = []
+                    lora_model_dropdowns = []
+                    lora_trigger_htmls = []
 
                     for i, (enabled, filename, weight) in enumerate(modules.config.default_loras):
                         with gr.Row():
@@ -691,6 +710,17 @@ with shared.gradio_root:
                                                     maximum=modules.config.default_loras_max_weight, step=0.01, value=weight,
                                                     elem_classes='lora_weight', scale=5)
                             lora_ctrls += [lora_enabled, lora_model, lora_weight]
+
+                        lora_trigger_html = gr.HTML(value=lora_info.trigger_words_html(filename))
+                        lora_model.change(lora_info.trigger_words_html, inputs=lora_model,
+                                          outputs=lora_trigger_html, queue=False, show_progress=False)
+                        lora_model_dropdowns.append(lora_model)
+                        lora_trigger_htmls.append(lora_trigger_html)
+
+                    # Programmatic dropdown updates (presets, metadata import) do not
+                    # fire .change in gradio 3.x, so chain this after those events.
+                    def refresh_lora_trigger_htmls(*filenames):
+                        return [lora_info.trigger_words_html(f) for f in filenames]
 
                     with gr.Row():
                         civitai_url = gr.Textbox(label='Download LoRA from Civitai',
@@ -936,42 +966,44 @@ with shared.gradio_root:
 
                 def download_civitai_lora_clicked(url, *lora_args):
                     triples = [list(lora_args[i:i + 3]) for i in range(0, len(lora_args), 3)]
+                    no_change = ([u for _ in triples for u in (gr.update(), gr.update(), gr.update())]
+                                 + [gr.update()] * len(triples))
 
                     if not (url or '').strip():
-                        no_change = [u for _ in triples for u in (gr.update(), gr.update(), gr.update())]
                         return [gr.update(value='⚠️ Please enter a Civitai URL.', visible=True)] + no_change
 
                     try:
                         filename = civitai.download_lora(url)
                     except Exception as e:
-                        no_change = [u for _ in triples for u in (gr.update(), gr.update(), gr.update())]
                         return [gr.update(value=f'❌ Download failed: {e}', visible=True)] + no_change
 
                     modules.config.update_files()
-                    import modules.lora_info as lora_info
                     lora_info.build_lora_trigger_page()
                     choices = ['None'] + modules.config.lora_filenames
 
                     assigned = False
                     updates = []
+                    trigger_updates = []
                     for enabled, model, weight in triples:
                         if not assigned and model in (None, 'None'):
                             updates += [gr.update(value=True),
                                         gr.update(choices=choices, value=filename),
                                         gr.update()]
+                            trigger_updates.append(lora_info.trigger_words_html(filename))
                             assigned = True
                         else:
                             updates += [gr.update(), gr.update(choices=choices), gr.update()]
+                            trigger_updates.append(gr.update())
 
                     if assigned:
                         msg = f'✅ Downloaded and selected `{filename}`.'
                     else:
                         msg = f'✅ Downloaded `{filename}`. All LoRA slots are in use — select it manually.'
-                    return [gr.update(value=msg, visible=True)] + updates
+                    return [gr.update(value=msg, visible=True)] + updates + trigger_updates
 
                 civitai_download.click(download_civitai_lora_clicked,
                                        inputs=[civitai_url] + lora_ctrls,
-                                       outputs=[civitai_status] + lora_ctrls,
+                                       outputs=[civitai_status] + lora_ctrls + lora_trigger_htmls,
                                        queue=False, show_progress=True)
 
         state_is_generating = gr.State(False)
@@ -1023,7 +1055,8 @@ with shared.gradio_root:
             preset_selection.change(preset_selection_change, inputs=[preset_selection, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=True) \
                 .then(fn=style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False) \
                 .then(lambda: None, _js='()=>{refresh_style_localization();}') \
-                .then(inpaint_engine_state_change, inputs=[inpaint_engine_state] + enhance_inpaint_mode_ctrls, outputs=enhance_inpaint_engine_ctrls, queue=False, show_progress=False)
+                .then(inpaint_engine_state_change, inputs=[inpaint_engine_state] + enhance_inpaint_mode_ctrls, outputs=enhance_inpaint_engine_ctrls, queue=False, show_progress=False) \
+                .then(refresh_lora_trigger_htmls, inputs=lora_model_dropdowns, outputs=lora_trigger_htmls, queue=False, show_progress=False)
 
         performance_selection.change(lambda x: [gr.update(interactive=not flags.Performance.has_restricted_features(x))] * 11 +
                                                [gr.update(visible=not flags.Performance.has_restricted_features(x))] * 1 +
@@ -1110,7 +1143,8 @@ with shared.gradio_root:
 
         prompt.input(parse_meta, inputs=[prompt, state_is_generating], outputs=[prompt, generate_button, load_parameter_button], queue=False, show_progress=False)
 
-        load_parameter_button.click(modules.meta_parser.load_parameter_button_click, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False)
+        load_parameter_button.click(modules.meta_parser.load_parameter_button_click, inputs=[prompt, state_is_generating, inpaint_mode], outputs=load_data_outputs, queue=False, show_progress=False) \
+            .then(refresh_lora_trigger_htmls, inputs=lora_model_dropdowns, outputs=lora_trigger_htmls, queue=False, show_progress=False)
 
         def trigger_metadata_import(file, state_is_generating):
             parameters, metadata_scheme = modules.meta_parser.read_info_from_image(file)
@@ -1124,7 +1158,8 @@ with shared.gradio_root:
             return modules.meta_parser.load_parameter_button_click(parsed_parameters, state_is_generating, inpaint_mode)
 
         metadata_import_button.click(trigger_metadata_import, inputs=[metadata_input_image, state_is_generating], outputs=load_data_outputs, queue=False, show_progress=True) \
-            .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False)
+            .then(style_sorter.sort_styles, inputs=style_selections, outputs=style_selections, queue=False, show_progress=False) \
+            .then(refresh_lora_trigger_htmls, inputs=lora_model_dropdowns, outputs=lora_trigger_htmls, queue=False, show_progress=False)
 
         generate_button.click(lambda: (gr.update(visible=True, interactive=True), gr.update(visible=True, interactive=True), gr.update(visible=False, interactive=False), [], True),
                               outputs=[stop_button, skip_button, generate_button, gallery, state_is_generating]) \

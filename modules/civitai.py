@@ -89,16 +89,40 @@ def resolve_lora(url: str):
         raise ValueError('Civitai API did not return a download URL.')
     if not file_name:
         file_name = f'civitai_{version.get("id", "lora")}.safetensors'
-    trained_words = version.get('trainedWords') or []
-    return download_url, file_name, trained_words
+
+    resolved_model_id = version.get('modelId') or model_id
+    resolved_version_id = version.get('id') or version_id
+    civitai_url = ''
+    if resolved_model_id:
+        civitai_url = f'{CIVITAI_DOMAIN}/models/{resolved_model_id}'
+        if resolved_version_id:
+            civitai_url += f'?modelVersionId={resolved_version_id}'
+
+    info = {
+        'trained_words': version.get('trainedWords') or [],
+        'base_model': version.get('baseModel') or '',
+        'civitai_url': civitai_url,
+    }
+    return download_url, file_name, info
 
 
-def _save_sidecar(dest: str, url: str, trained_words: list):
-    """Write a sidecar JSON next to the LoRA with its Civitai trigger words."""
+def _apply_base_model_prefix(file_name: str, base_model: str) -> str:
+    """Prefix the file name with its Civitai base model, e.g. "[Pony] name.safetensors"."""
+    cleaned = re.sub(r'[\\/:*?"<>|]', '', base_model or '').strip()
+    if not cleaned:
+        return file_name
+    prefix = f'[{cleaned}] '
+    if file_name.startswith(prefix):
+        return file_name
+    return prefix + file_name
+
+
+def _save_sidecar(dest: str, url: str, info: dict):
+    """Write a sidecar JSON next to the LoRA with its Civitai metadata."""
     sidecar = dest + SIDECAR_SUFFIX
     try:
         with open(sidecar, 'w', encoding='utf-8') as f:
-            json.dump({'source_url': url, 'trained_words': trained_words}, f, indent=2)
+            json.dump({'source_url': url, **info}, f, indent=2)
     except Exception as e:
         print(f'Could not write Civitai sidecar {sidecar}: {e}')
 
@@ -108,14 +132,25 @@ def download_lora(url: str) -> str:
 
     Returns the saved file name. Skips the download if the file already exists.
     """
-    download_url, file_name, trained_words = resolve_lora(url)
+    download_url, original_name, info = resolve_lora(url)
+    file_name = _apply_base_model_prefix(original_name, info.get('base_model', ''))
     model_dir = modules.config.paths_loras[0]
     os.makedirs(model_dir, exist_ok=True)
     dest = os.path.abspath(os.path.join(model_dir, file_name))
 
+    # A copy downloaded before base-model prefixing may exist under the
+    # original name — rename it (and drop its sidecar) instead of re-downloading.
+    if file_name != original_name:
+        legacy = os.path.abspath(os.path.join(model_dir, original_name))
+        if os.path.exists(legacy) and not os.path.exists(dest):
+            print(f'Renaming existing LoRA: {legacy} -> {dest}')
+            os.replace(legacy, dest)
+            if os.path.exists(legacy + SIDECAR_SUFFIX):
+                os.remove(legacy + SIDECAR_SUFFIX)
+
     # Always (re)write the sidecar so trigger words are available even if the
     # model file itself is already present from a previous download.
-    _save_sidecar(dest, url, trained_words)
+    _save_sidecar(dest, url, info)
 
     if os.path.exists(dest):
         print(f'LoRA already present, skipping download: {dest}')

@@ -18,8 +18,8 @@ def _find_lora_path(filename: str):
     return None
 
 
-def _read_sidecar_words(lora_path: str):
-    """Trigger words saved by the Civitai downloader, if any."""
+def _read_sidecar(lora_path: str):
+    """Metadata saved by the Civitai downloader, if any."""
     sidecar = lora_path + SIDECAR_SUFFIX
     if not os.path.exists(sidecar):
         return None
@@ -27,7 +27,11 @@ def _read_sidecar_words(lora_path: str):
         with open(sidecar, 'r', encoding='utf-8') as f:
             data = json.load(f)
         words = data.get('trained_words') or []
-        return [w for w in words if isinstance(w, str) and w.strip()]
+        return {
+            'words': [w for w in words if isinstance(w, str) and w.strip()],
+            'base_model': data.get('base_model') or '',
+            'url': data.get('civitai_url') or data.get('source_url') or '',
+        }
     except Exception:
         return None
 
@@ -63,30 +67,125 @@ def _top_training_tags(metadata: dict, limit: int = 15):
     return [tag for tag, _ in ordered[:limit]]
 
 
-def get_trigger_words(filename: str):
-    """Return (words, source) for a LoRA filename.
+def get_lora_info(filename: str) -> dict:
+    """Return {words, source, base_model, url} for a LoRA filename.
 
     source is one of: 'civitai', 'metadata', or '' when nothing was found.
     """
+    info = {'words': [], 'source': '', 'base_model': '', 'url': ''}
     lora_path = _find_lora_path(filename)
     if lora_path is None:
-        return [], ''
+        return info
 
-    words = _read_sidecar_words(lora_path)
-    if words:
-        return words, 'civitai'
+    sidecar = _read_sidecar(lora_path)
+    if sidecar is not None:
+        info['base_model'] = sidecar['base_model']
+        info['url'] = sidecar['url']
+        if sidecar['words']:
+            info['words'] = sidecar['words']
+            info['source'] = 'civitai'
 
-    words = _top_training_tags(_read_safetensors_metadata(lora_path))
-    if words:
-        return words, 'metadata'
+    if not info['words'] or not info['base_model']:
+        metadata = _read_safetensors_metadata(lora_path)
+        if not info['base_model']:
+            info['base_model'] = metadata.get('ss_base_model_version', '') or ''
+        if not info['words']:
+            words = _top_training_tags(metadata)
+            if words:
+                info['words'] = words
+                info['source'] = 'metadata'
 
-    return [], ''
+    return info
+
+
+def delete_lora(filename: str) -> str:
+    """Delete a LoRA file (and its Civitai sidecar). Returns a status message."""
+    lora_path = _find_lora_path(filename)
+    if lora_path is None:
+        return f'Not found: {filename}'
+
+    # Refuse anything that resolves outside the configured LoRA folders.
+    allowed = False
+    for folder in modules.config.paths_loras:
+        folder = os.path.abspath(folder)
+        if os.path.commonpath([lora_path, folder]) == folder:
+            allowed = True
+            break
+    if not allowed:
+        return f'Refused to delete path outside the LoRA folders: {filename}'
+
+    try:
+        os.remove(lora_path)
+        sidecar = lora_path + SIDECAR_SUFFIX
+        if os.path.exists(sidecar):
+            os.remove(sidecar)
+    except Exception as e:
+        return f'Could not delete {filename}: {e}'
+    print(f'Deleted LoRA: {lora_path}')
+    return f'Deleted {filename}'
+
+
+def trigger_words_html(filename) -> str:
+    """Small HTML snippet listing a LoRA's trigger words, for the LoRA dropdown rows."""
+    if not filename or filename == 'None':
+        return ''
+    info = get_lora_info(filename)
+    if not info['words']:
+        return ''
+    if info['source'] == 'civitai':
+        label = 'Trigger words'
+        words = info['words']
+    else:
+        label = 'Top training tags'
+        words = info['words'][:10]
+    words_html = ', '.join(f'<code>{html.escape(w)}</code>' for w in words)
+    return (f'<div style="font-size: 12px; opacity: .75; margin: -4px 0 4px 2px;">'
+            f'{label}: {words_html}</div>')
+
+
+# The page is served from gradio's "<root>/file=<abspath>" route, so stripping
+# everything from "file=" onwards yields the app root for API calls.
+_PAGE_SCRIPT = '''
+async function deleteLora(btn) {
+  const filename = btn.dataset.filename;
+  if (!confirm('Delete "' + filename + '" from disk? This cannot be undone.')) {
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Deleting…';
+  const root = window.location.pathname.split('file=')[0];
+  try {
+    const resp = await fetch(root + 'run/delete_lora', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({data: [filename]}),
+    });
+    if (!resp.ok) {
+      throw new Error('HTTP ' + resp.status);
+    }
+    const result = await resp.json();
+    const message = (result.data && result.data[0]) || '';
+    if (message.startsWith('Deleted')) {
+      btn.closest('tr').remove();
+    } else {
+      alert(message || 'Delete failed.');
+      btn.disabled = false;
+      btn.textContent = 'Delete';
+    }
+  } catch (e) {
+    alert('Delete failed: ' + e);
+    btn.disabled = false;
+    btn.textContent = 'Delete';
+  }
+}
+'''
 
 
 def _render_html() -> str:
     rows = []
     for filename in modules.config.lora_filenames:
-        words, source = get_trigger_words(filename)
+        info = get_lora_info(filename)
+        words, source = info['words'], info['source']
         if source == 'civitai':
             words_html = ', '.join(f'<code>{html.escape(w)}</code>' for w in words)
             source_html = 'Civitai'
@@ -97,13 +196,30 @@ def _render_html() -> str:
         else:
             words_html = '<span class="none">—</span>'
             source_html = '<span class="none">unknown</span>'
+
+        if info['base_model']:
+            base_html = html.escape(info['base_model'])
+        else:
+            base_html = '<span class="none">—</span>'
+
+        if info['url']:
+            link_html = (f'<a href="{html.escape(info["url"])}" target="_blank" '
+                         f'rel="noopener">{html.escape(info["url"])}</a>')
+        else:
+            link_html = '<span class="none">—</span>'
+
         rows.append(
             f'<tr><td class="name">{html.escape(filename)}</td>'
-            f'<td>{words_html}</td><td class="src">{source_html}</td></tr>'
+            f'<td class="base">{base_html}</td>'
+            f'<td>{words_html}</td>'
+            f'<td class="link">{link_html}</td>'
+            f'<td class="src">{source_html}</td>'
+            f'<td><button class="delete" data-filename="{html.escape(filename)}" '
+            f'onclick="deleteLora(this)">Delete</button></td></tr>'
         )
 
     body = '\n'.join(rows) if rows else (
-        '<tr><td colspan="3" class="none">No LoRAs installed.</td></tr>'
+        '<tr><td colspan="6" class="none">No LoRAs installed.</td></tr>'
     )
 
     return f'''<!DOCTYPE html>
@@ -120,20 +236,32 @@ def _render_html() -> str:
   th {{ color: #c9c9c9; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }}
   td.name {{ font-weight: 600; white-space: nowrap; }}
   td.src {{ color: #9a9a9a; white-space: nowrap; }}
+  td.base {{ white-space: nowrap; }}
+  td.link {{ max-width: 260px; overflow-wrap: anywhere; font-size: 13px; }}
+  td.link a {{ color: #6fb3ff; }}
   code {{ background: #2e2e2e; padding: 1px 6px; border-radius: 4px; font-size: 13px; }}
   .none {{ color: #6f6f6f; }}
+  button.delete {{ background: #5a2323; color: #ffb3b3; border: 1px solid #7a3030; border-radius: 4px;
+                   padding: 4px 10px; cursor: pointer; font-size: 13px; }}
+  button.delete:hover {{ background: #7a2b2b; }}
+  button.delete:disabled {{ opacity: .5; cursor: wait; }}
 </style>
 </head>
 <body>
   <h1>Installed LoRAs &amp; Trigger Words</h1>
-  <p class="hint">Trigger words come from Civitai when a LoRA was downloaded via the Civitai button;
-     otherwise Fooocus shows the most frequent training tags from the file metadata (approximate).</p>
+  <p class="hint">Trigger words, base model and link come from Civitai when a LoRA was downloaded via the
+     Civitai button; otherwise Fooocus falls back to the file's safetensors metadata (approximate).
+     Deleting removes the file from disk — use the Refresh Files button in Fooocus afterwards to update
+     the LoRA dropdowns.</p>
   <table>
-    <thead><tr><th>LoRA</th><th>Trigger words</th><th>Source</th></tr></thead>
+    <thead><tr><th>LoRA</th><th>Base model</th><th>Trigger words</th><th>Link</th><th>Source</th><th></th></tr></thead>
     <tbody>
 {body}
     </tbody>
   </table>
+<script>
+{_PAGE_SCRIPT}
+</script>
 </body>
 </html>'''
 
